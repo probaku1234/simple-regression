@@ -1,0 +1,18 @@
+[env]
+LIBTORCH = { value = "target\\debug\\build\\torch-sys-fefb322651341327\\out\\libtorch\\libtorch", relative = true }
+LD_LIBRARY_PATH = { value="C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\bin", force = true }
+WANDB_API_KEY = { value = "19a5ce1d4c3acb76b18528cf58a3cc8f344f2df9", force = true }
+HIDDEN_SIZE = { value = "128", force = true }
+NUM_EPOCHS = { value = "5", force = true }
+BATCH_SIZE = { value = "10", force = true }
+GENERATE_DATASET = { value = "false", force = true }
+LEARNING_RATE = { value = "0.01", force = true }
+NORMALIZE_DATASET = { value = "true", force = true }
+DO_TRAIN = { value = "true", force = true }
+DO_VALIDATION = { value = "true", force = true }
+DO_TEST = { value = "true", force = true }
+NUM_TRAIN_SAMPLES = { value = "1000", force = true }
+NUM_VALID_SAMPLES = { value = "200", force = true }
+NUM_TEST_SAMPLES = { value = "200", force = true }
+LOG_STEP = { value = "10", force = true }
+RUN_NAME = { value = "third_run", force = true }
