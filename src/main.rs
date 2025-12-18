@@ -1,26 +1,27 @@
 mod data_generator;
 mod initializer;
 mod model;
+mod util;
 
-use crate::initializer::Initializer;
-use crate::model::Layer;
-use burn::backend::NdArray;
+use burn::backend::wgpu::{Wgpu, WgpuDevice};
+use dotenv::dotenv;
 
 fn main() {
-    type B = NdArray;
-    let zero_tensors =
-        Initializer::Zeroes.init_with::<B, 2, [usize; 2]>([2, 2], &Default::default());
-    let one_tensors = Initializer::Ones.init_with::<B, 2, [usize; 2]>([2, 2], &Default::default());
+    dotenv().ok();
 
-    println!(
-        "Zero Tensors: {:?}",
-        zero_tensors.val().to_data().to_vec::<f32>().unwrap()
-    );
-    println!(
-        "One Tensors: {:?}",
-        one_tensors.val().to_data().to_vec::<f32>().unwrap()
-    );
+    let make_dataset = std::env::var("GENERATE_DATASET").is_ok_and(|v| v == "true");
 
-    let layer: Layer<B> = Layer::init_with(&Initializer::Ones, 1, 1, &Default::default());
-    println!("Layer: {:?}", layer);
+    if make_dataset {
+        let num_dataset: usize = std::env::var("NUM_DATASET")
+            .unwrap_or_else(|_| "100000".to_string())
+            .parse()
+            .unwrap_or(100000);
+        data_generator::generate_and_save_data(num_dataset).expect("Failed to generate dataset");
+    }
+
+    let device = WgpuDevice::default();
+    let model: model::SimpleRegressionModel<Wgpu> = model::SimpleRegressionModel::init(&device);
+    let tensors = model.prepare_tensors(0..10);
+
+    println!("tensors: {:?}", tensors);
 }
