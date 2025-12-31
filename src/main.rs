@@ -2,6 +2,7 @@ mod data_generator;
 mod initializer;
 mod model;
 mod util;
+mod activation;
 
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use dotenv::dotenv;
@@ -21,7 +22,7 @@ fn main() {
 
     let device = WgpuDevice::default();
     let model: model::SimpleRegressionModel<Wgpu> = model::SimpleRegressionModel::init(&device);
-    let tensors = model.prepare_tensors(0..10);
+    let tensors = model.prepare_tensors(0..1000);
 
-    println!("tensors: {:?}", tensors);
+    model.do_train(Option::from(tensors));
 }
