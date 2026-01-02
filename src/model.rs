@@ -41,10 +41,9 @@ impl TrainConfig {
             .unwrap_or_else(|_| "10".to_string())
             .parse()
             .unwrap_or(10);
-        
-        let run_name = std::env::var("RUN_NAME")
-            .unwrap_or_else(|_| "default_run".to_string());
-        
+
+        let run_name = std::env::var("RUN_NAME").unwrap_or_else(|_| "default_run".to_string());
+
         TrainConfig {
             hidden_size,
             batch_size,
@@ -129,11 +128,15 @@ impl<B: Backend> SimpleRegressionModel<B> {
     pub fn prepare_tensors(
         &self,
         range: std::ops::Range<usize>,
-    ) -> (Vec<(Tensor<B, 2>, Tensor<B, 1>)>) {
+    ) -> (Vec<(Tensor<B, 2>, Tensor<B, 1>)>, (f32, f32), (f32, f32)) {
         let data = read_data_from_csv("data.csv").expect("should read data from csv");
         let batch_size = self.train_config.batch_size;
         let mut inputs: Vec<Tensor<B, 2>> = Vec::new();
         let mut targets: Vec<Tensor<B, 1>> = Vec::new();
+        let mut x_mean: f32 = 0.0;
+        let mut x_std: f32 = 1.0;
+        let mut y_mean: f32 = 0.0;
+        let mut y_std: f32 = 1.0;
 
         if range.end - range.start > data.len() || range.end > data.len() {
             panic!("Range is greater than dataset length {}", data.len());
@@ -142,9 +145,22 @@ impl<B: Backend> SimpleRegressionModel<B> {
         let start = range.start;
         let end = range.end;
 
+        let xs: Vec<f32> = data[start..end].iter().map(|(x, _)| *x).collect();
+        let ys: Vec<f32> = data[start..end].iter().map(|(_, y)| *y).collect();
+
+        x_mean = xs.iter().sum::<f32>() / xs.len() as f32;
+        y_mean = ys.iter().copied().sum::<f32>() / ys.len() as f32;
+
+        x_std = (xs.iter().map(|&v| (v - x_mean).powi(2)).sum::<f32>() / xs.len() as f32).sqrt();
+        y_std = (ys.iter().map(|&v| (v - y_mean).powi(2)).sum::<f32>() / ys.len() as f32).sqrt();
+
         for (x, y) in data[start..end].iter() {
-            let input_tensor = Tensor::<B, 1>::from_floats([*x], &self.device);
-            let target_tensor = Tensor::<B, 1>::from_floats([*y], &self.device);
+            let x_norm = (*x - x_mean) / x_std.max(1e-8);
+            let y_norm = (*y - y_mean) / y_std.max(1e-8);
+
+            let input_tensor = Tensor::<B, 1>::from_floats([x_norm], &self.device);
+            let target_tensor = Tensor::<B, 1>::from_floats([y_norm], &self.device); // keep y unchanged
+
             inputs.push(input_tensor.unsqueeze()); // [1] → [1, 1]
             targets.push(target_tensor);
         }
@@ -173,7 +189,11 @@ impl<B: Backend> SimpleRegressionModel<B> {
             batched_targets.push(target_tensor);
         }
 
-        batched_inputs.into_iter().zip(batched_targets).collect()
+        (
+            batched_inputs.into_iter().zip(batched_targets).collect(),
+            (x_mean, x_std),
+            (y_mean, y_std),
+        )
     }
 
     fn compute_loss(&self, logits: Tensor<B, 2>, targets: Tensor<B, 2>) -> Tensor<B, 1> {
@@ -182,10 +202,7 @@ impl<B: Backend> SimpleRegressionModel<B> {
         loss.mean()
     }
 
-    pub fn do_train(
-        &self,
-        input_target_tensors: Option<Vec<(Tensor<B, 2>, Tensor<B, 1>)>>,
-    ) {
+    pub fn do_train(&self, input_target_tensors: Option<Vec<(Tensor<B, 2>, Tensor<B, 1>)>>) {
         create_artifact_dir(&self.train_config.run_name);
 
         let input_target_tensors = input_target_tensors.unwrap();
