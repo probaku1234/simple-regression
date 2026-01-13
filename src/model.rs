@@ -11,6 +11,12 @@ fn create_artifact_dir(run_name: &str) {
     std::fs::remove_dir_all(format!("{ARTIFACT_DIR}/{run_name}")).ok();
     std::fs::create_dir_all(format!("{ARTIFACT_DIR}/{run_name}")).ok();
 }
+#[derive(Debug, Clone, PartialEq)]
+enum ScalingMethod {
+    None,
+    Norm,
+    Stand,
+}
 
 /// Configuration for training a neural network model.
 ///
@@ -23,6 +29,7 @@ pub struct TrainConfig {
     /// The size of each batch used during training.
     batch_size: usize,
     num_epochs: usize,
+    scaling_method: ScalingMethod,
     run_name: String,
 }
 
@@ -41,14 +48,19 @@ impl TrainConfig {
             .unwrap_or_else(|_| "10".to_string())
             .parse()
             .unwrap_or(10);
-        
-        let run_name = std::env::var("RUN_NAME")
-            .unwrap_or_else(|_| "default_run".to_string());
-        
+        let scaling_method = match std::env::var("SCALING_METHOD").unwrap_or_default().as_str() {
+            "norm" => ScalingMethod::Norm,
+            "stand" => ScalingMethod::Stand,
+            _ => ScalingMethod::None,
+        };
+
+        let run_name = std::env::var("RUN_NAME").unwrap_or_else(|_| "default_run".to_string());
+
         TrainConfig {
             hidden_size,
             batch_size,
             num_epochs,
+            scaling_method,
             run_name,
         }
     }
@@ -129,24 +141,61 @@ impl<B: Backend> SimpleRegressionModel<B> {
     pub fn prepare_tensors(
         &self,
         range: std::ops::Range<usize>,
-    ) -> (Vec<(Tensor<B, 2>, Tensor<B, 1>)>) {
+    ) -> (Vec<(Tensor<B, 2>, Tensor<B, 1>)>, (f32, f32), (f32, f32)) {
         let data = read_data_from_csv("data.csv").expect("should read data from csv");
         let batch_size = self.train_config.batch_size;
-        let mut inputs: Vec<Tensor<B, 2>> = Vec::new();
-        let mut targets: Vec<Tensor<B, 1>> = Vec::new();
 
-        if range.end - range.start > data.len() || range.end > data.len() {
-            panic!("Range is greater than dataset length {}", data.len());
-        }
+        let (mut x_stats, mut y_stats) = ((0.0, 1.0), (0.0, 1.0));
 
         let start = range.start;
         let end = range.end;
+        let slice = &data[start..end];
 
-        for (x, y) in data[start..end].iter() {
-            let input_tensor = Tensor::<B, 1>::from_floats([*x], &self.device);
-            let target_tensor = Tensor::<B, 1>::from_floats([*y], &self.device);
-            inputs.push(input_tensor.unsqueeze()); // [1] → [1, 1]
-            targets.push(target_tensor);
+        let xs: Vec<f32> = slice.iter().map(|(x, _)| *x).collect();
+        let ys: Vec<f32> = slice.iter().map(|(_, y)| *y).collect();
+
+        match self.train_config.scaling_method {
+            ScalingMethod::Stand => {
+                let x_mean = xs.iter().sum::<f32>() / xs.len() as f32;
+                let y_mean = ys.iter().sum::<f32>() / ys.len() as f32;
+                let x_std = (xs.iter().map(|&v| (v - x_mean).powi(2)).sum::<f32>()
+                    / xs.len() as f32)
+                    .sqrt();
+                let y_std = (ys.iter().map(|&v| (v - y_mean).powi(2)).sum::<f32>()
+                    / ys.len() as f32)
+                    .sqrt();
+                x_stats = (x_mean, x_std);
+                y_stats = (y_mean, y_std);
+            }
+            ScalingMethod::Norm => {
+                let x_min = xs.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+                let x_max = xs.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+                let y_min = ys.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+                let y_max = ys.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+                x_stats = (x_min, x_max);
+                y_stats = (y_min, y_max);
+            }
+            ScalingMethod::None => {}
+        }
+
+        let mut inputs: Vec<Tensor<B, 2>> = Vec::new();
+        let mut targets: Vec<Tensor<B, 1>> = Vec::new();
+
+        for (x, y) in slice.iter() {
+            let (x_final, y_final) = match self.train_config.scaling_method {
+                ScalingMethod::Stand => (
+                    (*x - x_stats.0) / x_stats.1.max(1e-8),
+                    (*y - y_stats.0) / y_stats.1.max(1e-8),
+                ),
+                ScalingMethod::Norm => (
+                    (*x - x_stats.0) / (x_stats.1 - x_stats.0).max(1e-8),
+                    (*y - y_stats.0) / (y_stats.1 - y_stats.0).max(1e-8),
+                ),
+                ScalingMethod::None => (*x, *y),
+            };
+
+            inputs.push(Tensor::<B, 1>::from_floats([x_final], &self.device).unsqueeze());
+            targets.push(Tensor::<B, 1>::from_floats([y_final], &self.device));
         }
 
         let mut batched_inputs: Vec<Tensor<B, 2>> = Vec::new();
@@ -154,15 +203,15 @@ impl<B: Backend> SimpleRegressionModel<B> {
 
         for i in (0..inputs.len()).step_by(batch_size) {
             let end = std::cmp::min(i + batch_size, inputs.len());
-            let batch_inputs = &inputs[i..end];
-            let batch_targets = &targets[i..end];
-
             let input_tensor = Tensor::cat(
-                batch_inputs.iter().map(|t| t.clone().unsqueeze()).collect(),
+                inputs[i..end]
+                    .iter()
+                    .map(|t| t.clone().unsqueeze())
+                    .collect(),
                 0,
             );
             let target_tensor = Tensor::cat(
-                batch_targets
+                targets[i..end]
                     .iter()
                     .map(|t| t.clone().unsqueeze())
                     .collect(),
@@ -173,7 +222,11 @@ impl<B: Backend> SimpleRegressionModel<B> {
             batched_targets.push(target_tensor);
         }
 
-        batched_inputs.into_iter().zip(batched_targets).collect()
+        (
+            batched_inputs.into_iter().zip(batched_targets).collect(),
+            x_stats,
+            y_stats,
+        )
     }
 
     fn compute_loss(&self, logits: Tensor<B, 2>, targets: Tensor<B, 2>) -> Tensor<B, 1> {
@@ -182,10 +235,7 @@ impl<B: Backend> SimpleRegressionModel<B> {
         loss.mean()
     }
 
-    pub fn do_train(
-        &self,
-        input_target_tensors: Option<Vec<(Tensor<B, 2>, Tensor<B, 1>)>>,
-    ) {
+    pub fn do_train(&self, input_target_tensors: Option<Vec<(Tensor<B, 2>, Tensor<B, 1>)>>) {
         create_artifact_dir(&self.train_config.run_name);
 
         let input_target_tensors = input_target_tensors.unwrap();
