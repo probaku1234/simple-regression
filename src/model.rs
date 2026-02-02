@@ -1,5 +1,6 @@
 use crate::activation::{Activation, ReLU};
 use crate::initializer::Initializer;
+use crate::optimizer::{Optimizer, SGD};
 use crate::util::{debug_tensor, read_data_from_csv};
 use burn::module::Param;
 use burn::prelude::{Backend, Tensor};
@@ -30,6 +31,7 @@ pub struct TrainConfig {
     batch_size: usize,
     num_epochs: usize,
     scaling_method: ScalingMethod,
+    learning_rate: f32,
     run_name: String,
 }
 
@@ -53,6 +55,10 @@ impl TrainConfig {
             "stand" => ScalingMethod::Stand,
             _ => ScalingMethod::None,
         };
+        let learning_rate = std::env::var("LEARNING_RATE")
+            .unwrap_or_else(|_| "0.01".to_string())
+            .parse()
+            .unwrap_or(0.01);
 
         let run_name = std::env::var("RUN_NAME").unwrap_or_else(|_| "default_run".to_string());
 
@@ -61,6 +67,7 @@ impl TrainConfig {
             batch_size,
             num_epochs,
             scaling_method,
+            learning_rate,
             run_name,
         }
     }
@@ -105,6 +112,7 @@ pub struct SimpleRegressionModel<B: Backend> {
     output_layer: Layer<B>,
     // The device (CPU or GPU) the model is initialized on
     device: B::Device,
+    optimizer: SGD,
 }
 
 impl<B: Backend> SimpleRegressionModel<B> {
@@ -128,6 +136,8 @@ impl<B: Backend> SimpleRegressionModel<B> {
         let output_layer =
             Layer::init_with(&initializer, train_config.hidden_size, d_output, device);
 
+        let optimizer = SGD {};
+
         Self {
             train_config,
             d_input,
@@ -135,6 +145,7 @@ impl<B: Backend> SimpleRegressionModel<B> {
             input_layer,
             output_layer,
             device: device.clone(),
+            optimizer,
         }
     }
 
@@ -235,7 +246,7 @@ impl<B: Backend> SimpleRegressionModel<B> {
         loss.mean()
     }
 
-    pub fn do_train(&self, input_target_tensors: Option<Vec<(Tensor<B, 2>, Tensor<B, 1>)>>) {
+    pub fn do_train(&mut self, input_target_tensors: Option<Vec<(Tensor<B, 2>, Tensor<B, 1>)>>) {
         create_artifact_dir(&self.train_config.run_name);
 
         let input_target_tensors = input_target_tensors.unwrap();
@@ -270,6 +281,58 @@ impl<B: Backend> SimpleRegressionModel<B> {
                 let targets: Tensor<B, 2> = targets.clone().unsqueeze_dim(1);
                 let loss = self.compute_loss(z2.clone(), targets.clone());
                 debug_tensor("Loss", &loss);
+
+                println!("---------backward pass---------");
+                let grad_logits = z2.sub(targets) * (2.0 / self.train_config.batch_size as f32);
+                debug_tensor("grad_logits", &grad_logits);
+
+                let grad_weight_2 = a1.transpose().matmul(grad_logits.clone());
+                let grad_bias_2 = grad_logits.clone().sum_dim(0);
+                debug_tensor("grad_weight_2", &grad_weight_2);
+                debug_tensor("grad_bias_2", &grad_bias_2);
+
+                let grad_hidden = grad_logits.matmul(weight_2.transpose());
+                let grad_hidden_relu = ReLU::backward(grad_hidden, z1.clone());
+
+                let grad_weight_1 = inputs.clone().transpose().matmul(grad_hidden_relu.clone());
+                let grad_bias_1 = grad_hidden_relu.clone().sum_dim(0);
+                debug_tensor("grad_weight_1", &grad_weight_1);
+                debug_tensor("grad_bias_1", &grad_bias_1);
+
+                let mut grads = [
+                    grad_weight_1.clone(),
+                    grad_bias_1.clone(),
+                    grad_weight_2.clone(),
+                    grad_bias_2.clone(),
+                ];
+
+                println!("---------updating weights and biases---------");
+                self.optimizer.step(
+                    self.train_config.learning_rate,
+                    &mut self.input_layer.weight,
+                    grads[0].clone(),
+                );
+                // sum_dum preserves the shape of tensor, so we need to squeeze the first dimension
+                self.optimizer.step(
+                    self.train_config.learning_rate,
+                    &mut self.input_layer.bias,
+                    grads[1].clone().squeeze(0),
+                );
+
+                self.optimizer.step(
+                    self.train_config.learning_rate,
+                    &mut self.output_layer.weight,
+                    grads[2].clone(),
+                );
+                // sum_dum preserves the shape of tensor, so we need to squeeze the first dimension
+                self.optimizer.step(
+                    self.train_config.learning_rate,
+                    &mut self.output_layer.bias,
+                    grads[3].clone().squeeze(0),
+                );
+
+                println!("---------{iteration}th iteration end---------");
+                iteration += 1;
             }
         }
     }
