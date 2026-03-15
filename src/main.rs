@@ -4,6 +4,7 @@ mod initializer;
 mod model;
 mod util;
 mod optimizer;
+mod model_recorder;
 
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use dotenv::dotenv;

@@ -1,5 +1,7 @@
 use crate::activation::{Activation, ReLU};
 use crate::initializer::Initializer;
+use crate::model_recorder::json_recorder::JsonRecorder;
+use crate::model_recorder::Recorder;
 use crate::optimizer::{Optimizer, SGD};
 use crate::util::{debug_tensor, read_data_from_csv};
 use burn::module::Param;
@@ -335,5 +337,18 @@ impl<B: Backend> SimpleRegressionModel<B> {
                 iteration += 1;
             }
         }
+
+        //     save param
+        JsonRecorder::save_all_params(
+            &self.input_layer.weight,
+            &self.input_layer.bias,
+            &self.output_layer.weight,
+            &self.output_layer.bias,
+            format!(
+                "{}/{}/{}",
+                ARTIFACT_DIR, self.train_config.run_name, "model.json"
+            )
+            .as_str(),
+        );
     }
 }
